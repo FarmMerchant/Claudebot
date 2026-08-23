@@ -28,10 +28,11 @@ import {
 } from "./config.js";
 import { durationMs, resampleMono, stereoToMono } from "./audio.js";
 import { transcribe } from "./stt.js";
-import { synthesize } from "./tts.js";
+import { synthesize, synthesizeStream } from "./tts.js";
 import { Conversation } from "./claude.js";
 import { randomOutburst } from "./noises.js";
 import { findWake, isCancel } from "./wake.js";
+import { engineFor, settingsFor, speakingIn, voiceFor } from "./prefs.js";
 
 interface SpeakerState {
   displayName: string;
@@ -233,7 +234,7 @@ export class VoiceSession {
 
     let reply: string;
     try {
-      reply = await this.conversation.ask(speaker, question);
+      reply = await this.conversation.ask(speaker, question, settingsFor(this.guildId));
     } catch (err) {
       console.error("[claude]", err);
       reply = "Sorry, I couldn't reach my brain just then. Try again?";
@@ -249,10 +250,39 @@ export class VoiceSession {
       })
       .catch(() => undefined);
 
+    // Muted with /speak: the text reply above still went out, which is the
+    // whole point — the answer is not lost, just not read aloud.
+    if (!speakingIn(this.guildId)) return;
+
     try {
-      await this.play(await synthesize(reply));
+      await this.playStream(
+        synthesizeStream(engineFor(this.guildId), reply, voiceFor(this.guildId)),
+      );
     } catch (err) {
       console.error("[tts]", err instanceof Error ? err.message : err);
+    }
+  }
+
+  /**
+   * Play chunks as they are rendered, starting the next one generating
+   * before blocking on the current one. Time to first word becomes one
+   * sentence of synthesis instead of the whole answer.
+   */
+  private async playStream(chunks: AsyncGenerator<Buffer>) {
+    const iterator = chunks[Symbol.asyncIterator]();
+    let pending = iterator.next();
+
+    try {
+      while (!this.destroyed) {
+        const { value, done } = await pending;
+        if (done) break;
+        pending = iterator.next();
+        await this.play(value);
+      }
+    } finally {
+      // Leaving early (destroyed, or a playback error) must not strand the
+      // generator mid-sentence with work still queued behind it.
+      await iterator.return?.(undefined).catch(() => undefined);
     }
   }
 
@@ -263,6 +293,25 @@ export class VoiceSession {
     this.player.play(resource);
     await entersState(this.player, AudioPlayerStatus.Playing, 10_000);
     await entersState(this.player, AudioPlayerStatus.Idle, 10 * 60_000);
+  }
+
+  get guildId(): string {
+    return this.channel.guild.id;
+  }
+
+  /** Speak one line right now, ignoring the conversation — used by /voice. */
+  async say(text: string): Promise<void> {
+    this.chain = this.chain
+      .then(async () => {
+        const pcm = await synthesize(
+          engineFor(this.guildId),
+          text,
+          voiceFor(this.guildId),
+        );
+        await this.play(pcm);
+      })
+      .catch((err) => console.error("[say]", err));
+    await this.chain;
   }
 
   cancelPlayback() {

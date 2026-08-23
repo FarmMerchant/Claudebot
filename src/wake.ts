@@ -5,7 +5,7 @@ import { config } from "./config.js";
  * "clod", "cloud", "claud", sometimes "clyde". Accept the near misses rather
  * than making people enunciate at a robot.
  */
-const CLAUDE_VARIANTS = "claude|claud|clod|cloud|clode|clyde|klaude|klod|garmin|garmeen|jarvis";
+const CLAUDE_VARIANTS = "claude|claud|clod|cloud|clode|clyde|klaude|klod|garmin|garmeen|jarvis|moose|mivimoose|mivamoose|mivamoos";
 const GREETING_VARIANTS = "hey|hay|hi|hey there|ok|okay|yo|a|uh";
 
 function buildWakeRegex(): RegExp {

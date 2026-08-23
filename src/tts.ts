@@ -1,75 +1,130 @@
-import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { config, DISCORD_SAMPLE_RATE } from "./config.js";
-import { monoToStereo, resampleMono } from "./audio.js";
+/**
+ * Text to speech. Three engines, switchable per guild with /engine:
+ *
+ *   supertonic (default) — fastest by a wide margin, 10 preset voices.
+ *   kokoro               — 28 voices, warmer, roughly 7x slower.
+ *   piper                — the original. Fast, robotic, needs a real install.
+ *
+ * All three return the same thing: 48 kHz, 16-bit, stereo PCM the voice
+ * connection can play as-is. The engine is passed in rather than read from
+ * config so two guilds can be on different ones at the same time.
+ */
 
-/** Piper voices ship a sibling JSON config that declares their sample rate. */
-let voiceSampleRate: number | null = null;
+import { config, type TtsEngine } from "./config.js";
+import { kokoroStream, kokoroSynthesize, kokoroVoices, warmKokoro } from "./kokoro.js";
+import {
+  SUPERTONIC_VOICES,
+  supertonicStream,
+  supertonicSynthesize,
+  warmSupertonic,
+} from "./supertonic.js";
+import { piperSynthesize } from "./piper.js";
 
-async function getVoiceSampleRate(): Promise<number> {
-  if (voiceSampleRate !== null) return voiceSampleRate;
-
-  try {
-    const raw = await readFile(`${config.piperModel}.json`, "utf8");
-    const parsed = JSON.parse(raw) as { audio?: { sample_rate?: number } };
-    voiceSampleRate = parsed.audio?.sample_rate ?? 22_050;
-  } catch {
-    // Most Piper voices are 22.05 kHz; assume that if the config is missing.
-    voiceSampleRate = 22_050;
+/**
+ * Sentence-at-a-time synthesis. Piper is fast enough that chunking it buys
+ * nothing, so it yields the whole line as one buffer.
+ */
+export async function* synthesizeStream(
+  engine: TtsEngine,
+  text: string,
+  voice?: string,
+): AsyncGenerator<Buffer> {
+  if (engine === "piper") {
+    yield await piperSynthesize(text);
+    return;
   }
-  return voiceSampleRate;
+  if (engine === "supertonic") {
+    yield* supertonicStream(text, voice);
+    return;
+  }
+  yield* kokoroStream(text, voice);
+}
+
+/** `voice` names a preset for the given engine; Piper ignores it. */
+export async function synthesize(
+  engine: TtsEngine,
+  text: string,
+  voice?: string,
+): Promise<Buffer> {
+  if (engine === "piper") return piperSynthesize(text);
+  if (engine === "supertonic") return supertonicSynthesize(text, voice);
+  return kokoroSynthesize(text, voice);
 }
 
 /**
- * Render text to PCM the voice connection can play as-is: 48 kHz, 16-bit,
- * stereo. Piper writes mono at its own rate, so we resample and duplicate.
+ * Load an engine's weights and run one throwaway pass. Called at startup for
+ * the configured engine, and again by /engine when a guild switches to one
+ * that has not been used yet — otherwise that cost lands on the first answer.
  */
-export async function synthesize(text: string): Promise<Buffer> {
-  const sampleRate = await getVoiceSampleRate();
-  const mono = await runPiper(text);
-  return monoToStereo(resampleMono(mono, sampleRate, DISCORD_SAMPLE_RATE));
+export async function warmTts(engine: TtsEngine = config.ttsEngine): Promise<void> {
+  if (engine === "piper") return;
+
+  const started = Date.now();
+
+  if (engine === "supertonic") {
+    await warmSupertonic();
+    console.log(
+      `[tts] supertonic ready (voice ${config.supertonicVoice}, ${config.supertonicSteps} steps) in ${Date.now() - started}ms`,
+    );
+    return;
+  }
+
+  await warmKokoro();
+  console.log(
+    `[tts] kokoro ready (voice ${config.kokoroVoice}, ${config.kokoroDtype}) in ${Date.now() - started}ms`,
+  );
 }
 
-function runPiper(text: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      config.piperBin,
-      // Note: --output_raw takes an underscore, unlike Piper's other long flags.
-      ["--model", config.piperModel, "--output_raw", "--quiet"],
-      { windowsHide: true },
-    );
+/**
+ * Why an engine can't be selected right now, or null if it can. Engines whose
+ * assets were never configured are still valid values of TTS_ENGINE — they
+ * just fail at synthesis time, which is far too late to tell anyone.
+ */
+export function engineUnavailable(engine: TtsEngine): string | null {
+  if (engine === "piper" && !config.piperBin) {
+    return "PIPER_BIN and PIPER_MODEL are not set in .env";
+  }
+  if (engine === "supertonic" && !config.supertonicDir) {
+    return "SUPERTONIC_DIR is not set in .env";
+  }
+  return null;
+}
 
-    const chunks: Buffer[] = [];
-    let stderr = "";
+export interface VoiceChoice {
+  id: string;
+  label: string;
+}
 
-    child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
-    child.stderr.on("data", (chunk) => {
-      stderr = (stderr + chunk.toString()).slice(-2000);
-    });
+/** Worst-to-best grades, so the picker can lead with the good voices. */
+const GRADES = ["F", "F+", "D-", "D", "D+", "C-", "C", "C+", "B-", "B", "B+", "A-", "A", "A+"];
 
-    child.on("error", (err) =>
-      reject(
-        new Error(
-          `Could not run ${config.piperBin}: ${err.message}. Check PIPER_BIN in .env.`,
-        ),
-      ),
-    );
+/**
+ * The voices available for /voice on a given engine, best first. Empty under
+ * Piper, whose voice is a file path chosen at startup rather than a runtime pick.
+ */
+export async function voiceChoices(
+  engine: TtsEngine = config.ttsEngine,
+): Promise<VoiceChoice[]> {
+  if (engine === "piper") return [];
 
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(`piper exited with code ${code}: ${stderr}`));
-        return;
-      }
-      const audio = Buffer.concat(chunks);
-      if (audio.length === 0) {
-        reject(new Error(`piper produced no audio: ${stderr}`));
-        return;
-      }
-      resolve(audio);
-    });
+  if (engine === "supertonic") {
+    return SUPERTONIC_VOICES.map((id) => ({
+      id,
+      label: `${id} — ${id.startsWith("F") ? "Female" : "Male"} preset ${id.slice(1)}`,
+    }));
+  }
 
-    // Piper reads one line of text per utterance from stdin.
-    child.stdin.write(`${text.replace(/\s+/g, " ").trim()}\n`);
-    child.stdin.end();
-  });
+  const voices = await kokoroVoices();
+  return Object.entries(voices)
+    .map(([id, raw]) => {
+      const meta = raw as Record<string, string | undefined>;
+      const grade = meta.overallGrade ?? "?";
+      return {
+        id,
+        label: `${id} — ${meta.name} (${meta.gender}, ${meta.language}, grade ${grade})`,
+        rank: GRADES.indexOf(grade),
+      };
+    })
+    .sort((a, b) => b.rank - a.rank || a.id.localeCompare(b.id))
+    .map(({ id, label }) => ({ id, label }));
 }

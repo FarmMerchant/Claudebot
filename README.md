@@ -21,7 +21,7 @@ Discord voice ──> Opus decode ──> 48kHz stereo PCM
                                         │
                                   Claude API  (metered)
                                         │
-                                    Piper  (local, free)
+                            Supertonic TTS  (local, free)
                                         │
                        resample to 48kHz stereo ──> Discord voice
 ```
@@ -72,18 +72,53 @@ Then grab a model from
 | `ggml-base.en.bin` | 142 MB | **Good starting point** |
 | `ggml-small.en.bin` | 466 MB | Better accuracy, ~3x slower |
 
-### 3. Piper (text to speech)
+### 3. Text to speech
 
-Download a Windows release from
+Three engines, chosen with `TTS_ENGINE`:
+
+| Engine | Real-time factor | Notes |
+|---|---|---|
+| `supertonic` (default) | ~0.06x | Fastest by a wide margin, 10 preset voices. Needs a ~255 MB asset download |
+| `kokoro` | ~0.4x | 28 voices, graded A-F. Weights download automatically |
+| `piper` | ~0.1x | Robotic. Needs a real install |
+
+**Supertonic** needs its models fetched once from
+[huggingface.co/Supertone/supertonic](https://huggingface.co/Supertone/supertonic)
+into the folder `SUPERTONIC_DIR` points at — `onnx/` (four `.onnx` files plus
+`tts.json` and `unicode_indexer.json`) and `voice_styles/` (`F1`-`F5`, `M1`-`M5`).
+The inference helper is vendored from their MIT-licensed Node example in
+[src/vendor/](src/vendor/), because the `supertonic` package on npm is a
+627-byte placeholder. The model weights are OpenRAIL-M licensed.
+
+`SUPERTONIC_STEPS` trades quality for speed: 2 is fastest, 8 is their default,
+4 is the middle setting used here. Output is peak-normalised on the way out,
+since Supertonic renders about a third as loud as Kokoro.
+
+**Kokoro** needs nothing installed — an 82M-parameter Apache-2.0 model whose
+weights come down from Hugging Face on first run (~311 MB, cached inside
+`node_modules`) and whose 28 voices ship inside the npm package.
+
+Pick a voice by listening to it:
+
+```powershell
+npm run voices                                  # list the live engine's voices
+npm run say -- "the quick brown fox" M3         # writes sample.wav
+```
+
+Then set `SUPERTONIC_VOICE` or `KOKORO_VOICE` in `.env`, or switch live with
+`/voice`. Kokoro's best-graded voices are `af_heart` (A) and `af_bella` (A-).
+
+**Piper** is the original engine — around ten times faster than Kokoro but
+noticeably robotic. It needs a Windows release from
 [OHF-Voice/piper1-gpl/releases](https://github.com/OHF-Voice/piper1-gpl/releases)
-(or [rhasspy/piper/releases](https://github.com/rhasspy/piper/releases)) and unzip
-to `C:\tools\piper`.
-
-Then download a voice — each is a `.onnx` file plus a `.onnx.json` config, and
-**you need both, side by side**. Browse them at
+unzipped to `C:	oolspiper`, plus a voice (a `.onnx` file **and** its
+`.onnx.json`, side by side) from
 [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US).
-`en_US-amy-medium` is a solid default.
 
+> **Version pin:** `onnxruntime-node` must stay at the version
+> `@huggingface/transformers` depends on (currently 1.21.0). Two copies at
+> different versions in one process fail with "The requested API version
+> [27] is not available" — native addons are process-global.
 ### 4. The Discord application
 
 1. Go to the [Developer Portal](https://discord.com/developers/applications) → **New Application**.
@@ -117,7 +152,16 @@ JavaScript.
 |---|---|
 | `/join` | Joins the voice channel you're in and starts listening |
 | `/leave` | Leaves and stops listening |
+| `/engine <name>` | Switches between `supertonic`, `kokoro` and `piper` live. Resets the voice to that engine default and loads its weights before replying |
+| `/voice <name>` | Switches the voice within the current engine. Start typing to search; Kokoro voices are sorted best-graded first |
+| `/speak [enabled]` | Turns spoken answers on or off. Omit the argument to just flip it |
+| `/model [name] [effort] [length]` | Switches model, thinking effort, or the answer length cap (100-1000 characters). Every option is optional; a bare `/model` reports the current settings |
 | `/reset` | Clears the conversation history |
+
+`/engine`, `/voice`, `/speak` and `/model` are per-server and live in memory only — a restart puts
+both back to what `.env` says, which is where a permanent choice belongs.
+While muted the bot still answers in the text channel and still plays random
+outbursts; `/speak` governs the AI voice, not the sound effects.
 
 Saying **"Hey Claude, stop"** (or "never mind", "shut up", "cancel") cuts off
 whatever the bot is currently saying.
@@ -157,14 +201,24 @@ Everything below lives in `.env`.
 | `WHISPER_MODEL` | — | Path to a `ggml-*.bin` |
 | `WHISPER_THREADS` | `4` | Raise on a many-core machine to cut transcription time |
 | `WHISPER_LANGUAGE` | `en` | |
-| `PIPER_BIN` | — | Path to `piper.exe` |
-| `PIPER_MODEL` | — | Path to a `.onnx` voice |
+| `TTS_ENGINE` | `supertonic` | `supertonic` (fastest), `kokoro` (most voices) or `piper` (robotic) |
+| `SUPERTONIC_DIR` | — | Folder holding `onnx/` and `voice_styles/`. Required when `TTS_ENGINE=supertonic` |
+| `SUPERTONIC_VOICE` | `F1` | `F1`-`F5` or `M1`-`M5` |
+| `SUPERTONIC_STEPS` | `4` | Diffusion steps. 2 fastest, 8 best |
+| `SUPERTONIC_SPEED` | `1.05` | Speaking rate multiplier |
+| `KOKORO_VOICE` | `af_heart` | One of the 28 voices — see `npm run voices` |
+| `KOKORO_DTYPE` | `fp32` | `fp32`, `fp16`, `q8`, `q4`, `q4f16`. Counter-intuitively fp32 is the fastest on a desktop CPU |
+| `KOKORO_SPEED` | `1` | Speaking rate multiplier |
+| `PIPER_BIN` | — | Path to `piper.exe`. Only required when `TTS_ENGINE=piper` |
+| `PIPER_MODEL` | — | Path to a `.onnx` voice. Only required when `TTS_ENGINE=piper` |
 | `WAKE_PHRASE` | `hey claude` | Changing this switches from fuzzy to exact matching |
 | `OUTBURST_SOUNDS_DIR` | — | Folder of `.wav` files for the random outbursts. Unset disables them |
 
 ## Costs
 
-- **whisper.cpp, Piper, discord.js** — free and open source, running locally.
+- **whisper.cpp, Supertonic, Kokoro, Piper, discord.js** — free and open
+  source, running locally. Both neural voices are a one-off weights download
+  and cost nothing per use.
 - **Claude API** — pay-per-use, billed per token. Haiku 4.5 is the cheapest
   current model at $1 per million input tokens and $5 per million output.
   Answers are capped short too (the system prompt asks for 1–3 sentences,
@@ -174,25 +228,22 @@ Everything below lives in `.env`.
 
 ## Tuning
 
-Latency is dominated by whisper. If replies feel slow:
+Latency splits between whisper, Claude and TTS. Speech is synthesised one
+sentence at a time and played while the next is still rendering, so the bot
+starts talking after the first sentence rather than the whole answer. On a
+three-sentence answer that is 382 ms to first audio with Supertonic, against
+2.8 seconds for whole-answer Kokoro. If replies still feel slow:
 
-- Drop to `ggml-tiny.en.bin`, or raise `WHISPER_THREADS`.
-- If you have an NVIDIA GPU, use a CUDA-enabled whisper.cpp build — it's several
-  times faster than CPU.
+- `SUPERTONIC_STEPS=2` shaves off a little more at some cost in quality.
 
-If the bot triggers on things that weren't aimed at it, set an unusual
-`WAKE_PHRASE` to switch to exact matching. If it *misses* you, check the
-`[heard]` lines in the console to see what whisper actually transcribed.
-
-## Layout
-
-| File | Role |
-|---|---|
-| [src/index.ts](src/index.ts) | Discord client, slash commands, session lifecycle |
-| [src/session.ts](src/session.ts) | Per-guild voice session: capture, wake detection, playback |
-| [src/audio.ts](src/audio.ts) | PCM conversion — downmix, resample, WAV framing |
-| [src/stt.ts](src/stt.ts) | whisper.cpp subprocess + hallucination filtering |
-| [src/tts.ts](src/tts.ts) | Piper subprocess |
-| [src/claude.ts](src/claude.ts) | Claude API call and conversation history |
-| [src/wake.ts](src/wake.ts) | Wake phrase matching |
-| [src/noises.ts](src/noises.ts) | Synthesised fart and guttural noise for the random outbursts |
+- `/model name:claude-haiku-4-5` is the fastest model, roughly 0.7s against
+  Opus 5's 2s. `/model effort:low` matters only on Sonnet and Opus.
+- `TTS_ENGINE=piper` trades the voice quality back for roughly 10x the speed.
+- `WHISPER_THREADS` should be around half your core count; the default of 4 is
+  conservative for a desktop.
+- A smaller whisper model (`ggml-tiny.en`) cuts transcription time at a real
+  cost in accuracy, which the wake-phrase matcher then has to absorb.
+- `UTTERANCE_SILENCE_MS` in [src/config.ts](src/config.ts) is a fixed 800 ms
+  added to every question — the bot cannot know you have stopped talking until
+  you have been quiet that long. Lowering it to 600 is noticeable, but starts
+  cutting people off mid-sentence.

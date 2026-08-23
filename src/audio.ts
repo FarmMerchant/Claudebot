@@ -207,3 +207,13 @@ export function decodeWav(file: Buffer): WavAudio {
 
   return { pcm, sampleRate, channels };
 }
+
+/** Float samples in the -1..1 range (what a neural vocoder emits) -> 16-bit LE. */
+export function floatToPcm16(samples: Float32Array): Buffer {
+  const pcm = Buffer.allocUnsafe(samples.length * 2);
+  for (let i = 0; i < samples.length; i++) {
+    const clamped = Math.max(-1, Math.min(1, samples[i]));
+    pcm.writeInt16LE(Math.round(clamped * 32_767), i * 2);
+  }
+  return pcm;
+}
