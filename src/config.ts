@@ -11,8 +11,8 @@ function required(name: string, hint: string): string {
 }
 
 export const config = {
-  discordToken: required("DISCORD_TOKEN", "your bot token"),
-  discordClientId: required("DISCORD_CLIENT_ID", "your application ID"),
+  discordToken: required("DISCORD_TOKEN", "MTU0MTE3MTE5OTQ0NTMwNzQwMg.G0DZQi.h5w5PG8zZu_DLVIKjknTddIIrFQqyO3D8PbXZ8"),
+  discordClientId: required("DISCORD_CLIENT_ID", "1541171199445307402"),
   discordGuildId: process.env.DISCORD_GUILD_ID || undefined,
 
   // Speech-to-text: whisper.cpp, run locally.
@@ -25,7 +25,7 @@ export const config = {
   piperBin: required("PIPER_BIN", "path to piper.exe"),
   piperModel: required("PIPER_MODEL", "path to a .onnx voice file"),
 
-  claudeModel: process.env.CLAUDE_MODEL || "claude-haiku-4-5",
+  claudeModel: process.env.CLAUDE_MODEL || "claude-opus-5",
   wakePhrase: (process.env.WAKE_PHRASE || "hey claude").toLowerCase(),
 } as const;
 

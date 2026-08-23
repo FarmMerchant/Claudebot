@@ -127,15 +127,20 @@ The bot leaves on its own once the last human leaves the channel.
 ## Random outbursts
 
 While it's sitting in a channel the bot rolls once a second, with a 1-in-10,000
-chance of speaking up unprompted — roughly once every three hours. It picks one
-of three at random: a guttural noise, a very loud fart, or "I'm back."
+chance of speaking up unprompted — roughly once every three hours. It then picks
+one of the sound files in `OUTBURST_SOUNDS_DIR` at random and plays it.
 
-The fart and the guttural noise are synthesised from scratch in
-[src/noises.ts](src/noises.ts) rather than played from sound files, so there's
-nothing to download and no two come out quite the same. None of this reaches the
-conversation history and it never interrupts a real answer — if the bot is
-already talking, the roll is skipped. Adjust or switch it off via
-`OUTBURST_CHANCE` in [src/config.ts](src/config.ts).
+The pool is just that folder: drop a `.wav` in, restart, and it joins the
+rotation — no code change. [src/noises.ts](src/noises.ts) decodes every file
+once at startup and holds it in memory as 48 kHz stereo, so playback is
+instant. Mono, 8/16/24/32-bit and float WAVs all work, and anything at another
+sample rate is resampled on load. A file that is empty or unreadable is skipped
+with a warning at startup rather than taking the bot down, so watch the log for
+`loaded N of M .wav files` after `npm start`.
+
+None of this reaches the conversation history and it never interrupts a real
+answer — if the bot is already talking, the roll is skipped. Adjust the odds or
+switch it off via `OUTBURST_CHANCE` in [src/config.ts](src/config.ts).
 
 ## Configuration
 
@@ -155,6 +160,7 @@ Everything below lives in `.env`.
 | `PIPER_BIN` | — | Path to `piper.exe` |
 | `PIPER_MODEL` | — | Path to a `.onnx` voice |
 | `WAKE_PHRASE` | `hey claude` | Changing this switches from fuzzy to exact matching |
+| `OUTBURST_SOUNDS_DIR` | — | Folder of `.wav` files for the random outbursts. Unset disables them |
 
 ## Costs
 

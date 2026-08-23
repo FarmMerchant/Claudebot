@@ -18,6 +18,7 @@ import {
 } from "@discordjs/voice";
 import { config } from "./config.js";
 import { VoiceSession } from "./session.js";
+import { loadOutbursts } from "./noises.js";
 
 const sessions = new Map<string, VoiceSession>();
 
@@ -198,5 +199,8 @@ function shutdown() {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
+// Decode the outburst sounds up front so any bad file is reported at startup
+// rather than three hours later when the roll finally comes up.
+await loadOutbursts();
 await registerCommands();
 await client.login(config.discordToken);

@@ -30,11 +30,8 @@ import { durationMs, resampleMono, stereoToMono } from "./audio.js";
 import { transcribe } from "./stt.js";
 import { synthesize } from "./tts.js";
 import { Conversation } from "./claude.js";
-import { fart, guttural } from "./noises.js";
+import { randomOutburst } from "./noises.js";
 import { findWake, isCancel } from "./wake.js";
-
-/** The unprompted noises, picked from uniformly whenever the roll comes up. */
-const OUTBURSTS = ["guttural", "fart", "i'm back"] as const;
 
 interface SpeakerState {
   displayName: string;
@@ -89,24 +86,19 @@ export class VoiceSession {
     // Don't talk over an answer (or an earlier outburst) already in progress.
     if (this.player.state.status !== AudioPlayerStatus.Idle) return;
 
-    const kind = OUTBURSTS[Math.floor(Math.random() * OUTBURSTS.length)];
-    console.log(`[outburst] ${kind}`);
-
     this.chain = this.chain
-      .then(() => this.speakOutburst(kind))
+      .then(() => this.speakOutburst())
       .catch((err) => console.error("[outburst]", err));
   }
 
-  private async speakOutburst(kind: (typeof OUTBURSTS)[number]) {
+  private async speakOutburst() {
     if (this.destroyed) return;
     try {
-      const pcm =
-        kind === "fart"
-          ? fart()
-          : kind === "guttural"
-            ? guttural()
-            : await synthesize("I'm back.");
-      await this.play(pcm);
+      const sound = await randomOutburst();
+      if (!sound || this.destroyed) return;
+
+      console.log(`[outburst] ${sound.name}`);
+      await this.play(sound.pcm);
     } catch (err) {
       console.error("[outburst]", err instanceof Error ? err.message : err);
     }
