@@ -28,7 +28,7 @@ export class Conversation {
     this.history.push({ role: "user", content: `${speaker}: ${question}` });
     this.trim();
 
-    const response = await client.beta.messages.create({
+    const response = await client.messages.create({
       model: config.claudeModel,
       // Deliberately short: these answers are spoken, not read.
       max_tokens: 2000,
@@ -39,22 +39,10 @@ export class Conversation {
           cache_control: { type: "ephemeral" },
         },
       ],
-      thinking: { type: "adaptive" },
-      // Voice needs a fast turnaround. Low effort keeps thinking on (which
-      // avoids the disabled-thinking failure modes) while cutting latency.
-      output_config: { effort: "low" },
-      betas: ["server-side-fallback-2026-07-01"],
+      // No `thinking` block: Haiku 4.5 has no adaptive thinking, and a fixed
+      // budget would only add latency to an answer that gets read aloud.
       messages: this.history,
-      // `fallbacks: "default"` lets the server reroute a refusal to a suitable
-      // model instead of failing the turn. Spread last so the excess-property
-      // check doesn't reject it while it's absent from the SDK's types.
-      ...({ fallbacks: "default" } as const),
     });
-
-    if (response.stop_reason === "refusal") {
-      this.history.pop();
-      return "Sorry, I can't help with that one.";
-    }
 
     const text = response.content
       .filter((block): block is Anthropic.TextBlock => block.type === "text")

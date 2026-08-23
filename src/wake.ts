@@ -56,7 +56,7 @@ export function findWake(text: string): WakeMatch | null {
 
 /** "hey claude, stop" / "hey claude never mind" cancels whatever is queued. */
 export function isCancel(question: string): boolean {
-  return /^(stop|shut up|be quiet|nevermind|never mind|cancel|forget it|peter)\b/.test(
+  return /^(stop|shut up|be quiet|nevermind|never mind|cancel|forget it|peter|peter out|abort)\b/.test(
     question.trim(),
   );
 }

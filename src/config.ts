@@ -25,7 +25,7 @@ export const config = {
   piperBin: required("PIPER_BIN", "path to piper.exe"),
   piperModel: required("PIPER_MODEL", "path to a .onnx voice file"),
 
-  claudeModel: process.env.CLAUDE_MODEL || "claude-opus-5",
+  claudeModel: process.env.CLAUDE_MODEL || "claude-haiku-4-5",
   wakePhrase: (process.env.WAKE_PHRASE || "hey claude").toLowerCase(),
 } as const;
 

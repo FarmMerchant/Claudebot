@@ -147,7 +147,7 @@ Everything below lives in `.env`.
 | `DISCORD_CLIENT_ID` | — | Application ID |
 | `DISCORD_GUILD_ID` | — | Optional. Registers slash commands in one server instantly instead of globally (which takes up to an hour) |
 | `ANTHROPIC_API_KEY` | — | Optional if you've run `ant auth login` |
-| `CLAUDE_MODEL` | `claude-opus-5` | |
+| `CLAUDE_MODEL` | `claude-haiku-4-5` | |
 | `WHISPER_BIN` | — | Path to `whisper-cli.exe` |
 | `WHISPER_MODEL` | — | Path to a `ggml-*.bin` |
 | `WHISPER_THREADS` | `4` | Raise on a many-core machine to cut transcription time |
@@ -159,10 +159,11 @@ Everything below lives in `.env`.
 ## Costs
 
 - **whisper.cpp, Piper, discord.js** — free and open source, running locally.
-- **Claude API** — pay-per-use, billed per token. Answers are capped short (the
-  system prompt asks for 1–3 sentences, because a paragraph takes 45 seconds to
-  say aloud) and requests run at `effort: "low"` for latency, so a typical
-  question costs a fraction of a cent. There is no free tier; if you want zero
+- **Claude API** — pay-per-use, billed per token. Haiku 4.5 is the cheapest
+  current model at $1 per million input tokens and $5 per million output.
+  Answers are capped short too (the system prompt asks for 1–3 sentences,
+  because a paragraph takes 45 seconds to say aloud), so a typical question
+  costs a small fraction of a cent. There is no free tier; if you want zero
   spend end to end you'd need to swap `src/claude.ts` for a local model runner.
 
 ## Tuning
