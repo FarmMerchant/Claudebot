@@ -19,6 +19,7 @@ import type {
 import prism from "prism-media";
 import {
   ARMED_TIMEOUT_MS,
+  FOLLOW_UP_WINDOW_MS,
   DISCORD_SAMPLE_RATE,
   MIN_UTTERANCE_MS,
   OUTBURST_CHANCE,
@@ -31,8 +32,23 @@ import { transcribe } from "./stt.js";
 import { synthesize, synthesizeStream } from "./tts.js";
 import { Conversation } from "./claude.js";
 import { randomOutburst } from "./noises.js";
-import { findWake, isCancel } from "./wake.js";
-import { engineFor, settingsFor, speakingIn, voiceFor } from "./prefs.js";
+import { findWake, isCancel, looksLikeQuestion } from "./wake.js";
+import {
+  engineFor,
+  followUpsIn,
+  settingsFor,
+  speakingIn,
+  voiceFor,
+} from "./prefs.js";
+
+/**
+ * prism exposes decoding only as a Transform, but the per-packet method is
+ * right there and is what the Transform itself calls. Reaching for it is what
+ * lets us skip a bad packet instead of losing the stream.
+ */
+function decodePacket(decoder: prism.opus.Decoder, packet: Buffer): Buffer {
+  return (decoder as unknown as { _decode(buffer: Buffer): Buffer })._decode(packet);
+}
 
 interface SpeakerState {
   displayName: string;
@@ -49,6 +65,15 @@ export class VoiceSession {
   /** Serialises answering so two questions never talk over each other. */
   private chain: Promise<void> = Promise.resolve();
   private outburstTimer?: NodeJS.Timeout;
+  /**
+   * Bumped by cancelPlayback. Speech loops capture it and stop the moment it
+   * moves — stopping the player alone only ends the sentence being spoken,
+   * and the next one starts immediately after.
+   */
+  private speechGeneration = 0;
+  private yapping = false;
+  /** When the bot last finished speaking, for the follow-up window. */
+  private lastSpokeAt = 0;
   private destroyed = false;
 
   constructor(
@@ -146,11 +171,35 @@ export class VoiceSession {
       });
 
       const chunks: Buffer[] = [];
-      const stream = opus.pipe(decoder);
+      let dropped = 0;
 
-      stream.on("data", (chunk: Buffer) => chunks.push(chunk));
-      stream.once("end", () => resolve(Buffer.concat(chunks)));
-      stream.once("error", reject);
+      // Decode packet by packet instead of piping through the Transform.
+      // prism turns a single undecodable packet into a stream error, which
+      // would throw away the whole utterance — and opusscript (the pure-JS
+      // fallback we are on, because @discordjs/opus cannot build here)
+      // rejects packets libopus would accept. Losing someone's question to
+      // one bad packet is far worse than losing 20 ms of audio.
+      opus.on("data", (packet: Buffer) => {
+        try {
+          chunks.push(decodePacket(decoder, packet));
+        } catch {
+          dropped++;
+        }
+      });
+
+      opus.once("end", () => {
+        decoder.destroy();
+        if (dropped > 0) {
+          console.warn(`[capture] skipped ${dropped} undecodable packet(s)`);
+        }
+        resolve(Buffer.concat(chunks));
+      });
+
+      // A failure of the subscription itself is still fatal.
+      opus.once("error", (err) => {
+        decoder.destroy();
+        reject(err);
+      });
     });
   }
 
@@ -179,6 +228,11 @@ export class VoiceSession {
     if (state.armed) {
       // They said the wake phrase last time and nothing else — this is the question.
       this.disarm(state);
+      question = text;
+    } else if (this.withinFollowUp() && looksLikeQuestion(text)) {
+      // It just finished talking and someone asked something. Making people
+      // re-say the wake phrase for every follow-up is the single most
+      // annoying thing a voice assistant does.
       question = text;
     } else {
       const wake = findWake(text);
@@ -212,6 +266,13 @@ export class VoiceSession {
     }
     state.displayName = member.displayName;
     return state;
+  }
+
+  /** Still inside the grace period after the bot last spoke. */
+  private withinFollowUp(): boolean {
+    if (FOLLOW_UP_WINDOW_MS <= 0) return false;
+    if (!followUpsIn(this.guildId)) return false;
+    return Date.now() - this.lastSpokeAt < FOLLOW_UP_WINDOW_MS;
   }
 
   private disarm(state: SpeakerState) {
@@ -270,20 +331,28 @@ export class VoiceSession {
    */
   private async playStream(chunks: AsyncGenerator<Buffer>) {
     const iterator = chunks[Symbol.asyncIterator]();
+    const generation = this.speechGeneration;
     let pending = iterator.next();
 
     try {
-      while (!this.destroyed) {
+      while (!this.destroyed && generation === this.speechGeneration) {
         const { value, done } = await pending;
         if (done) break;
         pending = iterator.next();
         await this.play(value);
       }
     } finally {
+      // Only real speech opens the follow-up window — an outburst also goes
+      // through play(), and a fart is not an invitation to ask something.
+      this.markSpoken();
       // Leaving early (destroyed, or a playback error) must not strand the
       // generator mid-sentence with work still queued behind it.
       await iterator.return?.(undefined).catch(() => undefined);
     }
+  }
+
+  private markSpoken() {
+    this.lastSpokeAt = Date.now();
   }
 
   private async play(pcm: Buffer) {
@@ -299,22 +368,81 @@ export class VoiceSession {
     return this.channel.guild.id;
   }
 
-  /** Speak one line right now, ignoring the conversation — used by /voice. */
+  /**
+   * Speak one line right now, outside the conversation — used by /voice,
+   * /engine and /yap. Queued behind whatever is already talking so it never
+   * overlaps an answer.
+   */
   async say(text: string): Promise<void> {
     this.chain = this.chain
-      .then(async () => {
-        const pcm = await synthesize(
-          engineFor(this.guildId),
-          text,
-          voiceFor(this.guildId),
-        );
-        await this.play(pcm);
-      })
+      .then(() =>
+        this.playStream(
+          synthesizeStream(engineFor(this.guildId), text, voiceFor(this.guildId)),
+        ),
+      )
       .catch((err) => console.error("[say]", err));
     await this.chain;
   }
 
+  get isYapping(): boolean {
+    return this.yapping;
+  }
+
+  /**
+   * Talk continuously until told to stop. Each cycle is a fresh Claude call
+   * plus a synthesis pass, so this bills for as long as it runs — every exit
+   * path below matters.
+   */
+  startYapping(speaker: string, topic: string | null): void {
+    if (this.yapping) return;
+    this.yapping = true;
+    void this.yapLoop(speaker, topic).catch((err) => {
+      console.error("[yap]", err);
+      this.yapping = false;
+    });
+  }
+
+  stopYapping(): void {
+    this.yapping = false;
+    this.cancelPlayback();
+  }
+
+  private async yapLoop(speaker: string, topic: string | null) {
+    // cancelPlayback bumps this, which is how "Hey Claude, stop" ends the
+    // monologue rather than just cutting the sentence in flight.
+    const generation = this.speechGeneration;
+    const running = () =>
+      this.yapping && !this.destroyed && generation === this.speechGeneration;
+
+    let turn = 0;
+    while (running()) {
+      const prompt =
+        turn === 0
+          ? `Start talking${topic ? ` about ${topic}` : ""} and just keep going. Do not ask what I want or wait for a reply — this is a monologue.`
+          : "Keep going. Same monologue, next bit. Do not wrap up and do not ask a question.";
+
+      let line: string;
+      try {
+        line = await this.conversation.ask(speaker, prompt, settingsFor(this.guildId));
+      } catch (err) {
+        console.error("[yap]", err);
+        this.yapping = false;
+        return;
+      }
+
+      // The stop could have landed while Claude was thinking.
+      if (!running()) return;
+
+      turn++;
+      console.log(`[yap] turn ${turn}: ${line}`);
+      await this.say(line);
+    }
+  }
+
+  /** "Hey Claude, stop" — kill the current line, the queued sentences, and any yapping. */
   cancelPlayback() {
+    this.speechGeneration++;
+    this.yapping = false;
     this.player.stop(true);
   }
 

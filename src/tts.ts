@@ -3,6 +3,7 @@
  *
  *   supertonic (default) — fastest by a wide margin, 10 preset voices.
  *   kokoro               — 28 voices, warmer, roughly 7x slower.
+ *   fish                 — a Python sidecar over HTTP. Clones voices; slowest.
  *   piper                — the original. Fast, robotic, needs a real install.
  *
  * All three return the same thing: 48 kHz, 16-bit, stereo PCM the voice
@@ -19,6 +20,7 @@ import {
   warmSupertonic,
 } from "./supertonic.js";
 import { piperSynthesize } from "./piper.js";
+import { fishStream, fishSynthesize, fishVoices, warmFish } from "./fish.js";
 
 /**
  * Sentence-at-a-time synthesis. Piper is fast enough that chunking it buys
@@ -37,6 +39,10 @@ export async function* synthesizeStream(
     yield* supertonicStream(text, voice);
     return;
   }
+  if (engine === "fish") {
+    yield* fishStream(text, voice);
+    return;
+  }
   yield* kokoroStream(text, voice);
 }
 
@@ -48,6 +54,7 @@ export async function synthesize(
 ): Promise<Buffer> {
   if (engine === "piper") return piperSynthesize(text);
   if (engine === "supertonic") return supertonicSynthesize(text, voice);
+  if (engine === "fish") return fishSynthesize(text, voice);
   return kokoroSynthesize(text, voice);
 }
 
@@ -69,6 +76,12 @@ export async function warmTts(engine: TtsEngine = config.ttsEngine): Promise<voi
     return;
   }
 
+  if (engine === "fish") {
+    await warmFish();
+    console.log(`[tts] fish-speech reachable at ${config.fishUrl} in ${Date.now() - started}ms`);
+    return;
+  }
+
   await warmKokoro();
   console.log(
     `[tts] kokoro ready (voice ${config.kokoroVoice}, ${config.kokoroDtype}) in ${Date.now() - started}ms`,
@@ -87,6 +100,7 @@ export function engineUnavailable(engine: TtsEngine): string | null {
   if (engine === "supertonic" && !config.supertonicDir) {
     return "SUPERTONIC_DIR is not set in .env";
   }
+  // Reachability is async, so /engine checks that separately via warmTts.
   return null;
 }
 
@@ -106,6 +120,13 @@ export async function voiceChoices(
   engine: TtsEngine = config.ttsEngine,
 ): Promise<VoiceChoice[]> {
   if (engine === "piper") return [];
+
+  if (engine === "fish") {
+    return (await fishVoices()).map((id) => ({
+      id,
+      label: `${id} — cloned from ${id}.wav`,
+    }));
+  }
 
   if (engine === "supertonic") {
     return SUPERTONIC_VOICES.map((id) => ({

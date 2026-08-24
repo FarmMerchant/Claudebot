@@ -51,3 +51,6 @@ export function isEffort(value: string): value is Effort {
 export const MIN_REPLY_CHARS = 100;
 export const MAX_REPLY_CHARS = 1000;
 export const DEFAULT_REPLY_CHARS = 300;
+
+/** Long enough for a real character brief, short enough to keep the prompt lean. */
+export const MAX_PERSONALITY_CHARS = 500;

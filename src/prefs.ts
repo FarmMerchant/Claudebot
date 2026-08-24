@@ -7,10 +7,17 @@
  * after a restart.
  */
 
-import { config, defaultVoiceFor, type TtsEngine } from "./config.js";
+import {
+  DEFAULT_PERSONALITY,
+  FOLLOW_UP_WINDOW_MS,
+  config,
+  defaultVoiceFor,
+  type TtsEngine,
+} from "./config.js";
 import type { AskSettings } from "./claude.js";
 import {
   DEFAULT_REPLY_CHARS,
+  MAX_PERSONALITY_CHARS,
   MAX_REPLY_CHARS,
   MIN_REPLY_CHARS,
   isModelId,
@@ -20,6 +27,8 @@ import {
 
 interface GuildPrefs extends AskSettings {
   engine: TtsEngine;
+  /** Answer question-shaped speech shortly after the bot spoke, phrase or not. */
+  followUps: boolean;
   voice: string;
   /** False means answers are still posted as text, just not read aloud. */
   speaking: boolean;
@@ -37,12 +46,15 @@ function get(guildId: string): GuildPrefs {
   if (!existing) {
     existing = {
       engine: config.ttsEngine,
+      // The window length still comes from config; this is just the on switch.
+      followUps: FOLLOW_UP_WINDOW_MS > 0,
       voice: defaultVoiceFor(config.ttsEngine),
       speaking: true,
       model: DEFAULT_MODEL,
       // Spoken answers want latency over depth; /model effort raises it.
       effort: "low",
       maxChars: DEFAULT_REPLY_CHARS,
+      personality: config.personality,
     };
     prefs.set(guildId, existing);
   }
@@ -73,6 +85,17 @@ export function setVoiceFor(guildId: string, voice: string): void {
   get(guildId).voice = voice;
 }
 
+export function followUpsIn(guildId: string): boolean {
+  return get(guildId).followUps;
+}
+
+/** Sets to `on`, or flips the current value when `on` is undefined. */
+export function setFollowUpsIn(guildId: string, on?: boolean): boolean {
+  const current = get(guildId);
+  current.followUps = on ?? !current.followUps;
+  return current.followUps;
+}
+
 export function speakingIn(guildId: string): boolean {
   return get(guildId).speaking;
 }
@@ -86,9 +109,28 @@ export function setSpeakingIn(guildId: string, on?: boolean): boolean {
 
 /** Exactly what Conversation.ask needs, nothing else. */
 export function settingsFor(guildId: string): AskSettings {
-  const { model, effort, maxChars } = get(guildId);
-  return { model, effort, maxChars };
+  const { model, effort, maxChars, personality } = get(guildId);
+  return { model, effort, maxChars, personality };
 }
+
+export function personalityFor(guildId: string): string {
+  return get(guildId).personality;
+}
+
+/** Trimmed and capped; empty text restores the .env default. */
+export function setPersonalityFor(guildId: string, personality: string): string {
+  const cleaned = personality.trim().slice(0, MAX_PERSONALITY_CHARS);
+  get(guildId).personality = cleaned || config.personality;
+  return get(guildId).personality;
+}
+
+/** Back to whatever PERSONALITY says in .env, or the built-in default. */
+export function resetPersonalityFor(guildId: string): string {
+  get(guildId).personality = config.personality;
+  return get(guildId).personality;
+}
+
+export { DEFAULT_PERSONALITY };
 
 export function setModelFor(guildId: string, model: ModelId): void {
   get(guildId).model = model;

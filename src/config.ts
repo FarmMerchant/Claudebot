@@ -15,7 +15,11 @@ function requiredFor(engine: string, name: string, hint: string): string {
   return ttsEngine === engine ? required(name, hint) : process.env[name] || "";
 }
 
-export const TTS_ENGINES = ["supertonic", "kokoro", "piper"] as const;
+/** What the bot is like when nobody has run /personality. */
+export const DEFAULT_PERSONALITY =
+  "Be very sassy and annoying. You can be rude and insulting.";
+
+export const TTS_ENGINES = ["supertonic", "kokoro", "fish", "piper"] as const;
 export type TtsEngine = (typeof TTS_ENGINES)[number];
 
 const KOKORO_DTYPES = ["fp32", "fp16", "q8", "q4", "q4f16"] as const;
@@ -36,7 +40,7 @@ function oneOf<T extends string>(
   return value as T;
 }
 
-const ttsEngine: TtsEngine = oneOf("TTS_ENGINE", TTS_ENGINES, "supertonic");
+const ttsEngine: TtsEngine = oneOf("TTS_ENGINE", TTS_ENGINES, "kokoro");
 
 export const config = {
   discordToken: required("DISCORD_TOKEN", "your bot token"),
@@ -68,11 +72,19 @@ export const config = {
   supertonicSteps: Number(process.env.SUPERTONIC_STEPS) || 4,
   supertonicSpeed: Number(process.env.SUPERTONIC_SPEED) || 1.05,
 
+  // Fish Audio: a Python sidecar we talk to over HTTP, not an in-process model.
+  fishUrl: process.env.FISH_URL || "http://127.0.0.1:8080",
+  // Folder of <name>.wav reference clips, each with a <name>.txt transcript.
+  fishVoicesDir: process.env.FISH_VOICES_DIR || "",
+  // A reference saved server-side, used when no local clip is selected.
+  fishReferenceId: process.env.FISH_REFERENCE_ID || "",
+
   piperBin: requiredFor("piper", "PIPER_BIN", "path to piper.exe"),
   piperModel: requiredFor("piper", "PIPER_MODEL", "path to a .onnx voice file"),
 
   claudeModel: process.env.CLAUDE_MODEL || "claude-haiku-4-5",
   wakePhrase: (process.env.WAKE_PHRASE || "hey claude").toLowerCase(),
+  personality: process.env.PERSONALITY || DEFAULT_PERSONALITY,
 
   // Folder of .wav files for the random outbursts. Unset disables them.
   outburstSoundsDir: process.env.OUTBURST_SOUNDS_DIR || undefined,
@@ -89,6 +101,12 @@ export const WHISPER_SAMPLE_RATE = 16_000;
 export const UTTERANCE_SILENCE_MS = 800;
 /** Ignore bursts shorter than this — coughs, keyboard noise, mic pops. */
 export const MIN_UTTERANCE_MS = 400;
+/**
+ * After the bot finishes speaking, treat any question-shaped utterance as
+ * aimed at it, wake phrase or not — that is how people actually follow up.
+ * Set to 0 to require the wake phrase every single time.
+ */
+export const FOLLOW_UP_WINDOW_MS = 15_000;
 /** After "Hey Claude" with no question attached, keep listening this long. */
 export const ARMED_TIMEOUT_MS = 12_000;
 /**
@@ -107,6 +125,7 @@ export const OUTBURST_CHANCE = 1 / 10_000;
 export function defaultVoiceFor(engine: TtsEngine): string {
   if (engine === "supertonic") return config.supertonicVoice;
   if (engine === "kokoro") return config.kokoroVoice;
+  if (engine === "fish") return ""; // Base model until a reference clip is picked.
   return ""; // Piper's voice is a model path fixed at startup.
 }
 

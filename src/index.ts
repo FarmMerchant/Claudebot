@@ -17,23 +17,35 @@ import {
   generateDependencyReport,
   joinVoiceChannel,
 } from "@discordjs/voice";
-import { TTS_ENGINES, config, isTtsEngine } from "./config.js";
+import { FOLLOW_UP_WINDOW_MS, TTS_ENGINES, config, isTtsEngine } from "./config.js";
 import { VoiceSession } from "./session.js";
 import { loadOutbursts } from "./noises.js";
 import { warmTts, voiceChoices, engineUnavailable } from "./tts.js";
 import {
   engineFor,
+  personalityFor,
+  resetPersonalityFor,
+  setFollowUpsIn,
   setEffortFor,
   setEngineFor,
   setMaxCharsFor,
   setModelFor,
+  setPersonalityFor,
   setSpeakingIn,
   setVoiceFor,
   settingsFor,
   speakingIn,
   voiceFor,
 } from "./prefs.js";
-import { EFFORTS, MAX_REPLY_CHARS, MIN_REPLY_CHARS, MODELS, isEffort, isModelId } from "./models.js";
+import {
+  EFFORTS,
+  MAX_PERSONALITY_CHARS,
+  MAX_REPLY_CHARS,
+  MIN_REPLY_CHARS,
+  MODELS,
+  isEffort,
+  isModelId,
+} from "./models.js";
 
 const sessions = new Map<string, VoiceSession>();
 
@@ -65,6 +77,7 @@ const commands = [
         .addChoices(
           { name: "supertonic — fastest, 10 voices", value: "supertonic" },
           { name: "kokoro — warmer, 28 voices, slower", value: "kokoro" },
+          { name: "fish — clones voices, needs the Python sidecar", value: "fish" },
           { name: "piper — robotic, fixed voice", value: "piper" },
         ),
     ),
@@ -103,6 +116,37 @@ const commands = [
         .setDescription(`Longest answer in characters (${MIN_REPLY_CHARS}-${MAX_REPLY_CHARS}).`)
         .setMinValue(MIN_REPLY_CHARS)
         .setMaxValue(MAX_REPLY_CHARS),
+    ),
+  new SlashCommandBuilder()
+    .setName("personality")
+    .setDescription("Change how Claude behaves. Run it bare to see the current one.")
+    .addStringOption((option) =>
+      option
+        .setName("description")
+        .setDescription("e.g. Nice and respectful, or A weary pirate who has seen things.")
+        .setMaxLength(MAX_PERSONALITY_CHARS),
+    )
+    .addBooleanOption((option) =>
+      option
+        .setName("reset")
+        .setDescription("Restore the default personality."),
+    ),
+  new SlashCommandBuilder()
+    .setName("yap")
+    .setDescription("Talk continuously until stopped.")
+    .addStringOption((option) =>
+      option
+        .setName("topic")
+        .setDescription("What to ramble about. Leave empty and it picks something.")
+        .setMaxLength(200),
+    ),
+  new SlashCommandBuilder()
+    .setName("followup")
+    .setDescription("Answer follow-up questions without the wake phrase. Omit the option to flip it.")
+    .addBooleanOption((option) =>
+      option
+        .setName("enabled")
+        .setDescription("Leave this out to just toggle."),
     ),
   new SlashCommandBuilder()
     .setName("reset")
@@ -158,6 +202,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         break;
       case "model":
         await handleModel(interaction);
+        break;
+      case "personality":
+        await handlePersonality(interaction);
+        break;
+      case "yap":
+        await handleYap(interaction);
+        break;
+      case "followup":
+        await handleFollowUp(interaction);
         break;
       case "reset":
         await handleReset(interaction);
@@ -365,14 +418,18 @@ async function handleEngine(interaction: ChatInputCommandInteraction) {
   // Loading an engine for the first time takes a second or two, so take it
   // now with the interaction deferred instead of on the next question.
   await interaction.deferReply();
+  const previous = engineFor(interaction.guildId);
   const voice = setEngineFor(interaction.guildId, wanted);
 
   try {
     await warmTts(wanted);
   } catch (err) {
+    // Fish in particular can be configured but not running. Put the guild
+    // back rather than leaving every future answer to fail.
+    setEngineFor(interaction.guildId, previous);
     console.error("[engine]", err);
     await interaction.editReply(
-      `Switched to **${wanted}**, but it failed to load: ${err instanceof Error ? err.message : err}`,
+      `Could not switch to **${wanted}**: ${err instanceof Error ? err.message : err}. Staying on **${previous}**.`,
     );
     return;
   }
@@ -389,6 +446,84 @@ async function handleEngine(interaction: ChatInputCommandInteraction) {
       .say("Okay, this is what I sound like now.")
       .catch((err) => console.error("[engine]", err));
   }
+}
+
+async function handleFollowUp(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guildId) return;
+
+  const requested = interaction.options.getBoolean("enabled") ?? undefined;
+  const enabled = setFollowUpsIn(interaction.guildId, requested);
+  const seconds = Math.round(FOLLOW_UP_WINDOW_MS / 1000);
+
+  await interaction.reply(
+    enabled
+      ? `Follow-ups on. For ${seconds}s after I speak, I'll answer anything question-shaped without needing "Hey Claude".`
+      : 'Follow-ups off. Say "Hey Claude" every time.',
+  );
+}
+
+
+async function handleYap(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guildId) return;
+
+  const session = sessions.get(interaction.guildId);
+  if (!session) {
+    await interaction.reply({
+      content: "I'm not in a voice channel here. Run /join first.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  // Running it again is the off switch.
+  if (session.isYapping) {
+    session.stopYapping();
+    await interaction.reply("Fine, shutting up.");
+    return;
+  }
+
+  if (!speakingIn(interaction.guildId)) {
+    await interaction.reply({
+      content: "I'm muted — run /speak first, or this would just burn tokens in silence.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const topic = interaction.options.getString("topic");
+  session.startYapping(interaction.user.displayName, topic);
+
+  const how = 'Run `/yap` again or say "Hey Claude, stop".';
+  await interaction.reply(
+    topic ? `Yapping about **${topic}**. ${how}` : `Yapping. ${how}`,
+  );
+}
+
+
+async function handlePersonality(interaction: ChatInputCommandInteraction) {
+  if (!interaction.guildId) return;
+
+  const description = interaction.options.getString("description");
+  const reset = interaction.options.getBoolean("reset") ?? false;
+
+  if (reset) {
+    const restored = resetPersonalityFor(interaction.guildId);
+    await interaction.reply(`Personality reset to: *${restored}*`);
+    return;
+  }
+
+  if (!description) {
+    await interaction.reply(`Currently: *${personalityFor(interaction.guildId)}*`);
+    return;
+  }
+
+  const applied = setPersonalityFor(interaction.guildId, description);
+  await interaction.reply(`Personality set to: *${applied}*`);
+
+  // The new personality only reaches the model on the next question, and the
+  // history still holds replies in the old voice — clearing it stops the
+  // model pattern-matching its way back to how it was just behaving.
+  sessions.get(interaction.guildId)?.resetConversation();
 }
 
 async function handleModel(interaction: ChatInputCommandInteraction) {

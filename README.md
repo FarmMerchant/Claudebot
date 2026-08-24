@@ -21,7 +21,7 @@ Discord voice ──> Opus decode ──> 48kHz stereo PCM
                                         │
                                   Claude API  (metered)
                                         │
-                            Supertonic TTS  (local, free)
+                              Kokoro TTS  (local, free)
                                         │
                        resample to 48kHz stereo ──> Discord voice
 ```
@@ -36,9 +36,19 @@ is the moon?"*) or split them (*"Hey Claude?"* … *"how far away is the moon?"*
 after a bare wake phrase it stays armed for 12 seconds.
 
 Because the transcript comes from speech recognition, the wake phrase is matched
-loosely: **hey/hi/ok/yo** followed by **claude/claud/clod/cloud/clyde** all work.
-Whisper mangles "Claude" constantly and this is cheaper than making people
-enunciate at a robot.
+loosely. **hey/hi/hello/yo/ok/uh/excuse me** followed by any of
+**claude/claud/clod/cloud/clyde/cod/moose/garmin/jarvis** all work, and the
+distinctive spellings also wake it with no greeting at all — *"Claude, what time
+is it?"* or *"what do you think, Claude?"*. The ordinary English words in that
+list (cloud, moose, cod, clod) need a greeting in front, or *"the cloud is down"*
+would set it off mid-conversation.
+
+**Follow-ups need no wake phrase at all.** For 15 seconds after the bot finishes
+speaking, anything question-shaped is treated as aimed at it — so *"and how big
+is it?"* just works. Question-shaped means a question mark or an opener like
+what/how/can/tell me, and at least three words, so *"yeah nice one"* and *"what"*
+do not trigger it. Turn it off per server with `/followup`, or set `FOLLOW_UP_WINDOW_MS` to 0 in
+[src/config.ts](src/config.ts) to change the window length or disable it everywhere.
 
 ## Setup
 
@@ -74,12 +84,13 @@ Then grab a model from
 
 ### 3. Text to speech
 
-Three engines, chosen with `TTS_ENGINE`:
+Four engines, chosen with `TTS_ENGINE` and switchable live with `/engine`:
 
 | Engine | Real-time factor | Notes |
 |---|---|---|
-| `supertonic` (default) | ~0.06x | Fastest by a wide margin, 10 preset voices. Needs a ~255 MB asset download |
-| `kokoro` | ~0.4x | 28 voices, graded A-F. Weights download automatically |
+| `kokoro` (default) | ~0.4x | 28 voices graded A-F, warmer. Weights download automatically |
+| `supertonic` | ~0.06x | Fastest by a wide margin, 10 preset voices. Needs a ~255 MB asset download |
+| `fish` | GPU-bound | Clones a voice from a short recording. Needs a Python sidecar |
 | `piper` | ~0.1x | Robotic. Needs a real install |
 
 **Supertonic** needs its models fetched once from
@@ -107,6 +118,66 @@ npm run say -- "the quick brown fox" M3         # writes sample.wav
 
 Then set `SUPERTONIC_VOICE` or `KOKORO_VOICE` in `.env`, or switch live with
 `/voice`. Kokoro's best-graded voices are `af_heart` (A) and `af_bella` (A-).
+
+**Fish Audio** (OpenAudio S1-mini) is the only engine here that clones a voice.
+It is also the only one that is not in-process: fish-speech is Python, so it
+runs as a local sidecar and the bot talks to it over HTTP. Audio still never
+leaves the machine.
+
+It is not installed by default, and this machine has no Python at all — the
+`python.exe` on PATH is the Microsoft Store stub. Full setup:
+
+1. Install Python **3.12** — with the Python install manager already present,
+   that is `py install 3.12`; otherwise grab it from
+   [python.org](https://www.python.org/downloads/). It sits alongside any
+   newer version you have. The version matters: fish-speech pins
+   `torch==2.8.0`, which ships Windows wheels for CPython 3.9-3.13 only. On
+   3.14 the install fails with *no matching distribution for torch==2.8.0*,
+   and `py -3.12` fails first with *no runtime installed that matches 3.12*.
+2. `git clone https://github.com/fishaudio/fish-speech && cd fish-speech`
+   (cloning it inside this repo is fine — `fish-speech/` is gitignored.)
+3. Create the venv with that interpreter specifically, and install PyTorch
+   **with CUDA** first — the CPU build is far too slow to be usable here, and
+   installing it first stops `pip install -e .` pulling the CPU one:
+   ```powershell
+   py -3.12 -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu126
+   pip install -e .
+   ```
+   The `cu126` index is deliberate — `cu121` and `cu124` never got torch 2.8.0.
+   If `Activate.ps1` is blocked by the execution policy, either run
+   `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` first, or skip
+   activation and call `.\.venv\Scripts\python.exe` directly.
+4. The weights are **gated**, so accept the licence first: sign in to Hugging
+   Face and click *Agree and access repository* on
+   [fishaudio/openaudio-s1-mini](https://huggingface.co/fishaudio/openaudio-s1-mini).
+   Gating is automatic, so access is instant. Then make a **read** token at
+   [settings/tokens](https://huggingface.co/settings/tokens), log in, and
+   fetch it (CC-BY-NC-SA, non-commercial):
+   ```powershell
+   hf auth login
+   hf download fishaudio/openaudio-s1-mini --local-dir checkpoints/openaudio-s1-mini
+   ```
+   Without the licence step the download fails with *401 ... Cannot access
+   gated repo*. Use `hf`, not `huggingface-cli` — the latter is deprecated.
+5. Start the server, and leave it running alongside the bot:
+   ```powershell
+   python tools/api_server.py --llama-checkpoint-path checkpoints/openaudio-s1-mini --decoder-checkpoint-path checkpoints/openaudio-s1-mini/codec.pth --listen 127.0.0.1:8080
+   ```
+
+Then `/engine fish`. If the sidecar is not running the switch is refused and
+the bot stays on the engine it was using.
+
+To clone a voice, put `<name>.wav` (10-30 seconds of clean speech) in
+`FISH_VOICES_DIR` with a `<name>.txt` next to it containing exactly what is
+said in that clip. The transcript matters — a wrong one measurably degrades
+the clone. Each `.wav` then shows up as a voice in `/voice`.
+
+> **Hardware note:** S1-mini is 0.5B parameters and wants ~4 GB of VRAM. A
+> GTX 1650 has exactly 4 GB, so this will be tight, and it will be far slower
+> than Supertonic — seconds per sentence rather than a fifth of a second.
+> Cloning is the reason to use it, not speed.
 
 **Piper** is the original engine — around ten times faster than Kokoro but
 noticeably robotic. It needs a Windows release from
@@ -156,6 +227,9 @@ JavaScript.
 | `/voice <name>` | Switches the voice within the current engine. Start typing to search; Kokoro voices are sorted best-graded first |
 | `/speak [enabled]` | Turns spoken answers on or off. Omit the argument to just flip it |
 | `/model [name] [effort] [length]` | Switches model, thinking effort, or the answer length cap (100-1000 characters). Every option is optional; a bare `/model` reports the current settings |
+| `/personality [description] [reset]` | Rewrites how Claude behaves, e.g. `/personality description:Nice and respectful`. Bare shows the current one; `reset:true` restores the default. Clears the history so the old character does not bleed through |
+| `/yap [topic]` | Talks continuously until stopped. Run it again, say **"Hey Claude, stop"**, or `/leave`. Each cycle is a fresh Claude call, so it bills for as long as it runs |
+| `/followup [enabled]` | Turns the no-wake-phrase follow-up window on or off. Omit the option to flip it |
 | `/reset` | Clears the conversation history |
 
 `/engine`, `/voice`, `/speak` and `/model` are per-server and live in memory only — a restart puts
@@ -164,7 +238,8 @@ While muted the bot still answers in the text channel and still plays random
 outbursts; `/speak` governs the AI voice, not the sound effects.
 
 Saying **"Hey Claude, stop"** (or "never mind", "shut up", "cancel") cuts off
-whatever the bot is currently saying.
+whatever the bot is currently saying — the sentence in flight, every sentence
+still queued behind it, and any `/yap` monologue in progress.
 
 The bot leaves on its own once the last human leaves the channel.
 
@@ -206,12 +281,16 @@ Everything below lives in `.env`.
 | `SUPERTONIC_VOICE` | `F1` | `F1`-`F5` or `M1`-`M5` |
 | `SUPERTONIC_STEPS` | `4` | Diffusion steps. 2 fastest, 8 best |
 | `SUPERTONIC_SPEED` | `1.05` | Speaking rate multiplier |
+| `FISH_URL` | `http://127.0.0.1:8080` | Where the fish-speech sidecar is listening |
+| `FISH_VOICES_DIR` | — | Folder of `<name>.wav` + `<name>.txt` reference clips |
+| `FISH_REFERENCE_ID` | — | A reference saved server-side, used when no clip is picked |
 | `KOKORO_VOICE` | `af_heart` | One of the 28 voices — see `npm run voices` |
 | `KOKORO_DTYPE` | `fp32` | `fp32`, `fp16`, `q8`, `q4`, `q4f16`. Counter-intuitively fp32 is the fastest on a desktop CPU |
 | `KOKORO_SPEED` | `1` | Speaking rate multiplier |
 | `PIPER_BIN` | — | Path to `piper.exe`. Only required when `TTS_ENGINE=piper` |
 | `PIPER_MODEL` | — | Path to a `.onnx` voice. Only required when `TTS_ENGINE=piper` |
 | `WAKE_PHRASE` | `hey claude` | Changing this switches from fuzzy to exact matching |
+| `PERSONALITY` | sassy and annoying | Default character, up to 500 characters. `/personality` overrides it per server |
 | `OUTBURST_SOUNDS_DIR` | — | Folder of `.wav` files for the random outbursts. Unset disables them |
 
 ## Costs
